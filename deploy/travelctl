@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+config=/opt/travel-planner/app/deploy/supervisord.conf
+action=${1:-status}
+case "$action" in
+  start)
+    if /opt/travel-planner/venv/bin/supervisorctl -c "$config" pid >/dev/null 2>&1; then
+      /opt/travel-planner/venv/bin/supervisorctl -c "$config" start all
+    else
+      mkdir -p /opt/travel-planner/run /opt/travel-planner/logs
+      /opt/travel-planner/venv/bin/supervisord -c "$config"
+    fi
+    ;;
+  stop|restart|status)
+    exec /opt/travel-planner/venv/bin/supervisorctl -c "$config" "$action" all
+    ;;
+  *) echo 'Usage: travelctl start|stop|restart|status' >&2; exit 2 ;;
+esac

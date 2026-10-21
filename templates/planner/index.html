@@ -1,0 +1,76 @@
+{% load static %}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8f4">
+  <title>行间 · 旅行规划</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='11' fill='%2334694c'/%3E%3Cpath d='M12 11h13a6 6 0 0 1 0 12H15a5 5 0 0 0 0 10' fill='none' stroke='white' stroke-width='2'/%3E%3Ccircle cx='11' cy='11' r='3' fill='%2334694c' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{% static 'planner/app.css' %}">
+  <script defer src="{% static 'planner/app.js' %}"></script>
+</head>
+<body>
+  <svg class="symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-route" viewBox="0 0 24 24"><path d="M7 6h8a4 4 0 0 1 0 8H9a4 4 0 0 0 0 8"/><circle cx="5" cy="6" r="2.5"/><path d="m6 19 3 3 3-3"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M14 4h6v6m0-6L10 14M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></symbol>
+    <symbol id="i-login" viewBox="0 0 24 24"><path d="M14 4h5v16h-5M3 12h12m-4-4 4 4-4 4"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  </svg>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="行间首页"><span class="brand-mark"><svg><use href="#i-route"/></svg></span><strong>行间</strong><span class="brand-divider"></span><span class="brand-caption">旅行规划</span></a>
+    <div class="topbar-actions">
+      <button id="debug-toggle" class="quiet-button debug-toggle" role="switch" aria-checked="false" title="开启后记录后续执行步骤"><span class="switch-track"></span><span>调试模式</span></button>
+      <button id="login-button" class="quiet-button"><span class="login-dot"></span><span id="login-label">小红书登录</span><svg><use href="#i-login"/></svg></button>
+    </div>
+  </header>
+  <div class="mobile-switch"><button class="active" data-view="chat">旅行参数</button><button data-view="plan">行程</button></div>
+  <main class="workspace" id="workspace">
+    <section class="chat-panel" aria-label="旅行对话">
+      <div class="chat-heading"><div class="history-wrap"><select id="history" aria-label="切换行程"><option value="">新行程</option></select></div><button id="new-button" class="icon-button" title="新建行程" aria-label="新建行程"><svg><use href="#i-plus"/></svg></button></div>
+      <form id="trip-form" class="trip-form">
+        <h2>旅行参数</h2>
+        <label for="start-location">开始地点</label>
+        <input id="start-location" name="start_location" maxlength="200" placeholder="例如：北京站" required>
+        <div class="date-fields">
+          <div><label for="start-date">开始日期</label><input id="start-date" name="start_date" type="date" required></div>
+          <div><label for="end-date">结束日期</label><input id="end-date" name="end_date" type="date" required></div>
+        </div>
+        <p id="trip-duration" class="trip-duration" aria-live="polite">选择出行日期</p>
+        <label for="requirements-input">用户要求</label>
+        <textarea id="requirements-input" name="requirements" rows="4" maxlength="6000" placeholder="目的地、想去的地方、旅行倾向……也可以补充到达时间和预算。"></textarea>
+        <button id="plan-button" class="plan-button" type="submit">开始规划 <span>↗</span></button>
+      </form>
+      <div class="messages" id="messages" role="log" aria-live="polite"></div>
+      <details class="progress" id="progress" hidden><summary><span class="spinner"></span><span id="progress-label">正在规划</span><span class="progress-expand">详情</span></summary><ol id="progress-events"></ol></details>
+      <div class="composer-area" id="followup-area" hidden>
+        <form id="chat-form" class="composer">
+          <label class="sr-only" for="message-input">输入旅行需求</label>
+          <textarea id="message-input" rows="2" maxlength="6000" placeholder="补充信息，或告诉我想调整什么" required></textarea>
+          <div class="composer-bottom"><span>Enter 发送 · Shift + Enter 换行</span><button id="send-button" type="submit" aria-label="发送"><svg><use href="#i-arrow"/></svg></button></div>
+        </form>
+      </div>
+    </section>
+    <section class="plan-panel" aria-label="行程结果">
+      <details id="debug-panel" class="debug-panel" hidden open>
+        <summary><span>调试日志</span><span id="debug-count">0 条</span><a id="debug-download" hidden>下载 JSONL</a></summary>
+        <div id="debug-log" class="debug-log" aria-live="off"><p class="debug-empty">开启后记录后续步骤；发送需求后可查看详细日志。</p></div>
+      </details>
+      <div class="empty-plan" id="empty-plan">
+        <div class="journey-illustration" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="journey-path"></div><span class="mini-stop start-stop"></span><span class="mini-stop end-stop"></span><div class="journey-pin"><svg><use href="#i-pin"/></svg></div></div>
+        <span class="eyebrow">YOUR NEXT JOURNEY</span>
+        <h1>下一程，从这里开始。</h1>
+        <p>在左侧填写出发地点、日期和要求，开始规划。</p>
+        <div class="examples"><button data-prompt="想去杭州西湖和灵隐寺，安排轻松一点。">杭州，轻松一点 <span>↗</span></button><button data-prompt="想去成都吃本地美食，也想逛逛有特色的地方。">成都，逛吃之旅 <span>↗</span></button></div>
+      </div>
+      <article id="plan" class="plan" hidden></article>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
