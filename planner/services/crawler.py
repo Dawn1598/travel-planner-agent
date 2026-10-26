@@ -1,16 +1,16 @@
 """Read notes through a normal, user-authenticated browser. No signature emulation."""
-import hashlib
 import json
 import os
 import re
 import threading
-from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 from django.conf import settings
 from django.utils import timezone
 from .debug import record
+from .xhs_extract import extract_note, id_from_url, parse_published
+from .xhs_pipeline import Budget, BudgetExceeded, Limits, run_collection
 
 CRAWL_LOCK = threading.Lock()
 STATE_FILE = settings.RUNTIME_DIR / 'xhs-state.json'
@@ -51,65 +51,205 @@ def browser_options():
     return options
 
 
-def parse_published(value):
-    """Unknown dates stay unknown. A modified timestamp is never a publish date."""
-    if value is None or value == '':
-        return None
-    try:
-        if isinstance(value, (int, float)) or str(value).isdigit():
-            timestamp = float(value)
-            if timestamp > 10**12:
-                timestamp /= 1000
-            if timestamp < 946684800:
-                return None
-            result = datetime.fromtimestamp(timestamp, tz=timezone.get_current_timezone())
-        else:
-            text = str(value).strip()
-            if any(word in text for word in ('编辑', '修改', '更新于')):
-                return None
-            relative = re.search(r'(\d+)\s*(分钟|小时|天)前', text)
-            if relative:
-                number = int(relative[1])
-                delta = {'分钟': timedelta(minutes=number), '小时': timedelta(hours=number), '天': timedelta(days=number)}[relative[2]]
-                result = timezone.now() - delta
-            elif '昨天' in text:
-                result = timezone.now() - timedelta(days=1)
-            elif '今天' in text or '刚刚' in text:
-                result = timezone.now()
-            else:
-                match = re.search(r'(20\d{2})[-年/.](\d{1,2})[-月/.](\d{1,2})', text)
-                if not match:
-                    return None
-                result = timezone.make_aware(datetime(*map(int, match.groups())))
-        return result if result <= timezone.now() + timedelta(minutes=5) else None
-    except (ValueError, OverflowError, OSError):
-        return None
+LINKS = 'a[href*="/explore/"], a[href*="/search_result/"]'
+DETAIL = '#noteContainer, .note-container, .note-detail-mask .note-detail'
 
 
-def walk_notes(value):
-    if isinstance(value, dict):
-        if ('desc' in value or 'title' in value) and any(k in value for k in ('noteId', 'note_id')):
-            yield value
-        for child in value.values():
-            yield from walk_notes(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from walk_notes(child)
+class XhsBrowser:
+    """One search page and one reused detail page, each with its own response buffer."""
+    def __init__(self, context):
+        self.context = context
+        self.search = context.new_page()
+        self.detail = context.new_page()
+        self.search_data, self.detail_data = [], []
+        self.search_generation = 0
+        self.sort_response_confirmed = False
+        self.search_has_more = None
+        self.auth_error = False
+        self.report = {}
+        self.search.on('response', self.capture_search)
+        self.detail.on('response', self.capture_detail)
 
+    def response_data(self, response):
+        if '/api/sns/web/' not in response.url or not any(part in response.url for part in ('/feed', '/search/notes')):
+            return None
+        try:
+            data = response.json()
+            message = str(data.get('msg') or data.get('message') or '')
+            if any(word in message for word in ('登录', '验证', '访问频次')) or response.status in (401, 403, 429):
+                self.auth_error = True
+            return data
+        except Exception:
+            record('crawl.response_failed', error='response_not_json')
+            return None
 
-def note_from_data(data, url, city):
-    note_id = str(data.get('noteId') or data.get('note_id') or '')
-    title = str(data.get('title') or data.get('displayTitle') or '').strip()
-    desc = str(data.get('desc') or '').strip()
-    if not note_id or len(desc) < 25:
-        return None
-    published = parse_published(data.get('time') or data.get('publishTime') or data.get('publish_time'))
-    return {'note_id': note_id, 'title': title or desc[:60], 'content': desc,
-            'url': url, 'city': city, 'published_at': published,
-            'content_hash': hashlib.sha256((title + '\n' + desc).encode()).hexdigest()}
+    def capture_search(self, response):
+        data = self.response_data(response)
+        if data is None:
+            return
+        self.search_data.append(data)
+        if '/search/notes' in response.url:
+            self.search_generation += 1
+            body = data.get('data', {})
+            if isinstance(body, dict):
+                value = body.get('has_more', body.get('hasMore'))
+                if isinstance(value, bool):
+                    self.search_has_more = value
+            try:
+                posted = response.request.post_data_json or {}
+                if posted.get('sort') in ('time_descending', 'latest'):
+                    self.sort_response_confirmed = True
+            except Exception:
+                pass
+
+    def capture_detail(self, response):
+        data = self.response_data(response)
+        if data is not None:
+            self.detail_data.append(data)
+
+    def check_auth(self, page, budget=None):
+        # Inspect actual visible login/challenge text; no bypass or signature simulation.
+        visible = page.locator('body').inner_text(timeout=budget.timeout(2000) if budget else 2000)
+        if self.auth_error or any(text in visible for text in ('扫码登录', '手机号登录', '登录后查看', '安全验证', '访问频次', '请完成验证')):
+            raise LoginRequired('小红书需要登录或验证。请点击“小红书登录”完成后，再发送“继续”。')
+
+    def open_search(self, query, budget):
+        self.search.set_default_timeout(budget.timeout())
+        url = f'https://www.xiaohongshu.com/search_result?keyword={quote(query)}&source=web_search_result_notes'
+        self.search.goto(url, wait_until='domcontentloaded', timeout=budget.timeout(35000))
+        try:
+            self.search.locator(LINKS).first.wait_for(state='attached', timeout=budget.timeout(10000))
+        except Exception:
+            budget.check()
+        self.check_auth(self.search, budget)
+
+    def sort_latest(self, budget):
+        self.search.set_default_timeout(budget.timeout())
+        try:
+            control = self.search.get_by_text('最新', exact=True).first
+            if not control.is_visible():
+                for label in ('综合', '筛选'):
+                    trigger = self.search.get_by_text(label, exact=True).first
+                    if trigger.is_visible():
+                        trigger.hover(timeout=budget.timeout(2500))
+                        break
+            # Discard old comprehensive-search responses; wait for a new response or selected UI state.
+            self.search_data.clear()
+            self.search_has_more = None
+            self.sort_response_confirmed = False
+            generation = self.search_generation
+            try:
+                with self.search.expect_response(lambda response: '/api/sns/web/' in response.url and '/search/notes' in response.url,
+                                                 timeout=budget.timeout(6000)):
+                    control.click(timeout=budget.timeout(3000))
+            except Exception:
+                budget.check()  # UI confirmation below can still establish client-side sorting.
+            try:
+                self.search.wait_for_function('''() => [...document.querySelectorAll('*')].some(e =>
+                    e.textContent.trim() === '最新' && (e.getAttribute('aria-selected') === 'true' ||
+                    e.getAttribute('aria-checked') === 'true' || /(?:^|\\s)(?:active|selected|checked)(?:\\s|$)/.test(e.className || '')))''',
+                    timeout=budget.timeout(4000))
+                confirmed = True
+            except Exception:
+                confirmed = self.sort_response_confirmed and self.search_generation > generation
+            self.check_auth(self.search, budget)
+            return {'confirmed': confirmed, 'reason': 'selected_control_or_response' if confirmed else 'sort_not_confirmed_local_date_sort'}
+        except LoginRequired:
+            raise
+        except BudgetExceeded:
+            raise
+        except Exception as exc:
+            record('crawl.sort_fallback', reason='visible_control_failed', error_type=type(exc).__name__)
+            return {'confirmed': False, 'reason': 'visible_control_failed_local_date_sort'}
+
+    def search_snapshot(self, budget):
+        self.search.set_default_timeout(budget.timeout())
+        self.check_auth(self.search, budget)
+        rows = self.search.locator(LINKS).evaluate_all('''els => els.map(e => {
+            const card = e.closest('section.note-item, .note-item, [data-note-id]') || e;
+            return {url:e.href, title:(card.querySelector('.title')?.textContent || '').trim(),
+                    summary:(card.querySelector('.desc')?.textContent || '').trim()};
+        })''')
+        for row in rows:
+            # Snapshots contain only objects bound to this ID, never the whole authenticated state.
+            from .xhs_extract import matching_records
+            target = id_from_url(row['url'])
+            row['sources'] = [('search_response', {'note_id': target, 'payload': node})
+                              for payload in self.search_data for _, node in matching_records(payload, target)]
+        no_more = self.search_has_more is False or self.search.get_by_text(re.compile(r'^(没有更多了|没有更多内容|暂无搜索结果|没有找到相关内容)$')).count() > 0
+        return rows, no_more
+
+    def scroll(self, budget):
+        self.search.set_default_timeout(budget.timeout())
+        previous = self.search.locator(LINKS).evaluate_all('(els) => els.map(e => e.href).join("|")')
+        self.search.locator(LINKS).last.scroll_into_view_if_needed(timeout=budget.timeout(3000)) if previous else None
+        self.search.evaluate('''() => {
+            const card = document.querySelector('section.note-item, .note-item');
+            let parent = card?.parentElement;
+            while (parent && parent !== document.body) {
+                if (parent.scrollHeight > parent.clientHeight && /auto|scroll/.test(getComputedStyle(parent).overflowY)) {
+                    parent.scrollTop = parent.scrollHeight; return;
+                }
+                parent = parent.parentElement;
+            }
+            window.scrollTo(0, document.documentElement.scrollHeight);
+        }''')
+        try:
+            self.search.wait_for_function('''previous =>
+                [...document.querySelectorAll('a[href*="/explore/"], a[href*="/search_result/"]')].map(e => e.href).join('|') !== previous ||
+                /没有更多了|没有更多内容|暂无搜索结果/.test(document.body.innerText)''',
+                arg=previous, timeout=budget.timeout(4500))
+        except Exception:
+            budget.check()  # A timeout means a stagnant round, not success or an endless wait.
+        self.check_auth(self.search, budget)
+
+    def detail_snapshot(self, candidate):
+        target = candidate['note_id']
+        initial = self.detail.evaluate('''() => {
+            try { return JSON.parse(JSON.stringify(window.__INITIAL_STATE__?.note || {})); }
+            catch (_) { return {}; }
+        }''')
+        visible = self.detail.evaluate('''target => {
+            const root = document.querySelector('#noteContainer, .note-container, .note-detail-mask .note-detail');
+            if (!root) return {};
+            const id = root.getAttribute('data-note-id') || window.__INITIAL_STATE__?.note?.currentNoteId;
+            const canonical = document.querySelector('link[rel="canonical"]')?.href || '';
+            const bound = id === target || (!id && canonical.split('?')[0].endsWith('/' + target));
+            if (!bound) return {};
+            const video = root.querySelector('video');
+            const images = root.querySelector('.image-container img, .image-list img, .swiper-slide img');
+            return {noteId:target, title:root.querySelector('#detail-title')?.innerText || '',
+                    desc:root.querySelector('#detail-desc, .note-content .desc, .note-scroller .desc')?.innerText || '',
+                    publishTime:root.querySelector('.note-content .date, .bottom-container .date')?.innerText || '',
+                    type:video ? 'video' : images ? 'normal' : 'unknown'};
+        }''', target) if id_from_url(self.detail.url) == target else {}
+        return [('detail_response', value) for value in self.detail_data] + [('initial_state', initial), ('visible_page', visible)]
+
+    def read_detail(self, candidate, budget):
+        self.detail.set_default_timeout(budget.timeout())
+        self.detail_data.clear()
+        self.detail.goto(candidate['url'], wait_until='domcontentloaded', timeout=budget.timeout(25000))
+        self.check_auth(self.detail, budget)
+        sources = self.detail_snapshot(candidate)
+        note = extract_note(candidate['note_id'], candidate['url'], sources)
+        from .xhs_extract import validate_note
+        if validate_note(note):
+            # Date readiness is independent of body readiness. New response/state/DOM can finish later.
+            before = self.detail.evaluate('''() => JSON.stringify(window.__INITIAL_STATE__?.note || {}) +
+                (document.querySelector('#noteContainer, .note-container')?.innerText || '')''')
+            try:
+                self.detail.wait_for_function('''before => JSON.stringify(window.__INITIAL_STATE__?.note || {}) +
+                    (document.querySelector('#noteContainer, .note-container')?.innerText || '') !== before''',
+                    arg=before, timeout=budget.timeout(6000))
+            except Exception:
+                budget.check()
+            self.check_auth(self.detail, budget)
+            sources = self.detail_snapshot(candidate)
+        return sources
 
 
 def crawl(query, city='', emit=lambda *_: None):
+    """Collect, verify, judge and persist. Return actual ingestion counts plus diagnostics."""
     if city and city not in query:
         query = city + ' ' + query
     if not login_status()['logged_in']:
@@ -117,91 +257,33 @@ def crawl(query, city='', emit=lambda *_: None):
         raise LoginRequired('请点击“小红书登录”，在打开的浏览器中登录后，回来发送“继续”。')
     if not CRAWL_LOCK.acquire(timeout=3):
         raise RuntimeError('小红书正在采集另一项资料，请稍后重试。')
-    from playwright.sync_api import sync_playwright
-    notes = {}
+    adapter = None
     try:
-        record('crawl.start', query=query, city=city, max_notes=settings.XHS_MAX_NOTES)
-        emit('crawl', f'正在小红书查找：{query}')
+        from playwright.sync_api import sync_playwright
+        from .knowledge import existing_notes, judge_notes, save_notes
+
+        record('crawl.start', query=query)
+        limits = Limits.configured()
+        budget = Budget(limits)
         with sync_playwright() as p:
-            browser = p.chromium.launch(**browser_options())
-            context = browser.new_context(storage_state=str(STATE_FILE), locale='zh-CN')
-            page = context.new_page()
-            page.set_default_timeout(12000)
-            captured = []
-
-            def capture(response):
-                if '/api/sns/web/' in response.url and any(s in response.url for s in ('/feed', '/search/notes')):
-                    try:
-                        captured.append(response.json())
-                    except Exception:
-                        pass
-
-            page.on('response', capture)
-            search = f'https://www.xiaohongshu.com/search_result?keyword={quote(query)}&source=web_search_result_notes'
-            page.goto(search, wait_until='domcontentloaded', timeout=35000)
-            record('crawl.search_opened', url=search, title=page.title())
+            browser = p.chromium.launch(**browser_options(), timeout=budget.timeout(30000))
+            context = None
             try:
-                page.locator('a[href*="/explore/"], a[href*="/search_result/"]').first.wait_for(timeout=12000)
-            except Exception:
-                body = page.locator('body').inner_text()[:1500]
-                if any(s in body for s in ('扫码登录', '手机号登录', '登录后查看', '安全验证', '访问频次')):
-                    raise LoginRequired('小红书需要登录或验证。请点击“小红书登录”完成后，再发送“继续”。')
-            # Use the website's visible sorting control when available.
-            try:
-                page.get_by_text('综合', exact=True).first.hover(timeout=2000)
-                page.get_by_text('最新', exact=True).first.click(timeout=2000)
-                page.wait_for_timeout(1200)
-            except Exception as exc:
-                record('crawl.sort_fallback', message='最新排序控件不可用，使用当前结果并保留实际发布时间', error_type=type(exc).__name__)
-            links = page.locator('a[href*="/explore/"], a[href*="/search_result/"]').evaluate_all('(els) => els.map(e => e.href)')
-            candidates = []
-            for link in links:
-                if re.search(r'/(?:explore|search_result)/[a-fA-F0-9]{24}', link) and urlparse(link).hostname in ('www.xiaohongshu.com', 'xiaohongshu.com'):
-                    if link not in candidates:
-                        candidates.append(link)
-            record('crawl.candidates', count=len(candidates), urls=candidates[:settings.XHS_MAX_NOTES])
-            for link in candidates[:settings.XHS_MAX_NOTES]:
-                try:
-                    captured.clear()
-                    page.goto(link, wait_until='domcontentloaded', timeout=25000)
-                    try:
-                        page.locator('#detail-desc, .note-content .desc, .note-scroller .desc').first.wait_for(timeout=7000)
-                    except Exception:
-                        pass
-                    initial = page.evaluate('''() => {
-                        const s = window.__INITIAL_STATE__;
-                        if (!s) return {};
-                        try { return JSON.parse(JSON.stringify(s.note || {})); }
-                        catch (_) { return {}; }
-                    }''')
-                    found = False
-                    for data in walk_notes([initial, *captured]):
-                        note = note_from_data(data, link, city)
-                        if note:
-                            notes[note['note_id']] = note
-                            record('crawl.note', note=note, extraction='page_state_or_response')
-                            found = True
-                    if not found:
-                        desc = page.locator('#detail-desc, .note-content .desc, .note-scroller .desc').first
-                        if desc.count():
-                            content = desc.inner_text().strip()
-                            title = page.locator('#detail-title').inner_text() if page.locator('#detail-title').count() else content[:60]
-                            dates = page.locator('.note-content .date, .bottom-container .date')
-                            date = dates.first.inner_text() if dates.count() else None
-                            note_id = re.search(r'/(?:explore|search_result)/([a-fA-F0-9]{24})', link)[1]
-                            note = note_from_data({'noteId': note_id, 'title': title, 'desc': content, 'publishTime': date}, link, city)
-                            if note:
-                                notes[note_id] = note
-                                record('crawl.note', note=note, extraction='visible_page')
-                except LoginRequired:
-                    raise
-                except Exception as exc:
-                    record('crawl.note_error', url=link, error_type=type(exc).__name__, message=str(exc))
-                    continue
-            context.storage_state(path=str(STATE_FILE))
-            browser.close()
-        emit('crawl', f'获取 {len(notes)} 篇可读取的攻略' if notes else '未获取到可读取的正文，可能需要重新登录或完成验证')
-        record('crawl.finish', count=len(notes), note_ids=list(notes))
-        return list(notes.values())
+                context = browser.new_context(storage_state=str(STATE_FILE), locale='zh-CN', timezone_id='Asia/Shanghai', service_workers='block')
+                context.route('**/*', lambda route: route.abort() if route.request.resource_type in ('image', 'media') else route.continue_())
+                adapter = XhsBrowser(context)
+                return run_collection(adapter, query, existing=existing_notes, judge=judge_notes, save=save_notes,
+                                      emit=emit, limits=limits, budget=budget)
+            finally:
+                for resource in (context, browser):
+                    if resource is not None:
+                        try:
+                            resource.close()
+                        except Exception as exc:
+                            record('crawl.cleanup_failed', error_type=type(exc).__name__)
+    except Exception as exc:
+        if adapter and adapter.report:
+            exc.crawl_report = adapter.report
+        raise
     finally:
         CRAWL_LOCK.release()

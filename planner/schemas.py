@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, StrictBool
 
 
 class Analysis(BaseModel):
@@ -66,3 +66,18 @@ class EvidenceCheck(BaseModel):
     relevant_ids: list[int] = Field(default_factory=list)
     sufficient: bool = False
     missing: str = ''
+
+
+class NoteQuality(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    note_id: str
+    accept: StrictBool
+    cities: list[str]
+    places: list[str]
+    topics: list[str]
+    reason: str
+
+
+class NoteQualityBatch(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    notes: list[NoteQuality]

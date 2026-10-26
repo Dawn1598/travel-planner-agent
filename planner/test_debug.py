@@ -89,7 +89,7 @@ class DebugTests(TestCase):
 
 
 class DebugAsyncTests(TransactionTestCase):
-    @patch('planner.services.knowledge.crawler.crawl', return_value=[])
+    @patch('planner.services.knowledge.crawler.crawl', return_value={'new': 0, 'updated': 0, 'stop_reason': 'candidates_exhausted'})
     @patch('planner.services.agent.amap_tools', new_callable=AsyncMock)
     @patch('planner.services.agent.model')
     @patch('planner.services.agent.structured', new_callable=AsyncMock)

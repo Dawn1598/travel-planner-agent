@@ -267,7 +267,10 @@ const debugLabels = {'run.start':'任务开始','run.finish':'任务结束','run
   'mcp.tools':'高德工具清单','mcp.request':'高德请求','mcp.response':'高德返回','mcp.error':'高德异常','mcp.cache_hit':'高德缓存命中',
   'rag.request':'RAG 查询','rag.window':'检索时间窗口','rag.judgment':'资料相关性与充分性','rag.result':'检索结果','rag.empty':'本地无资料','rag.supplement':'触发补爬',
   'crawl.start':'采集开始','crawl.search_opened':'打开搜索','crawl.candidates':'候选笔记','crawl.note':'读取笔记','crawl.note_error':'笔记读取失败','crawl.sort_fallback':'排序降级','crawl.finish':'采集结束','crawl.login_required':'需要登录','crawl.cooldown':'采集冷却',
-  'embedding.complete':'向量计算','index.saved':'资料入库','index.unchanged':'笔记未变化','review.result':'行程检查结果','debug.enabled':'开启调试'};
+  'crawl.sort':'最新排序确认','crawl.scroll':'滚动候选收集','crawl.candidate':'候选处理结果','crawl.date':'日期核实路径',
+  'crawl.sorted':'按已核实日期排序','crawl.quality':'入库质量判断','crawl.response_failed':'响应读取失败','crawl.cleanup_failed':'浏览器释放异常',
+  'index.rejected':'入库校验拒绝','index.failed':'入库失败',
+  'embedding.complete':'向量计算','index.saved':'资料入库','index.unchanged':'正文未变化，检查元数据','review.result':'行程检查结果','debug.enabled':'开启调试'};
 async function refreshDebug() {
   if (!debugState.enabled || !debugState.run || debugState.loading) return;
   debugState.loading = true;

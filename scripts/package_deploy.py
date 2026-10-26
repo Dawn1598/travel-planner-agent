@@ -24,7 +24,9 @@ with sqlite3.connect(BASE / 'db.sqlite3') as source, sqlite3.connect(OUTPUT / 'd
 local = dotenv_values(BASE / '.env')
 config = {key: value for key, value in local.items() if key in (
     'DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL', 'DEEPSEEK_BASE_URL', 'AMAP_API_KEY',
-    'EMBEDDING_MODEL', 'MAX_AGENT_STEPS', 'MAX_REVISIONS', 'XHS_MAX_NOTES') and value is not None}
+    'EMBEDDING_MODEL', 'MAX_AGENT_STEPS', 'MAX_REVISIONS', 'XHS_CANDIDATE_LIMIT',
+    'XHS_TARGET_NEW', 'XHS_MAX_VISITS', 'XHS_TIME_BUDGET_SECONDS', 'XHS_RETRIES',
+    'XHS_STAGNANT_ROUNDS', 'XHS_REFRESH_HOURS') and value is not None}
 if not config.get('DEEPSEEK_API_KEY') or not config.get('AMAP_API_KEY'):
     raise RuntimeError('Missing backend API configuration')
 config.update(DJANGO_DEBUG='0', DJANGO_SECRET_KEY=secrets.token_hex(48),

@@ -44,6 +44,12 @@ class Note(models.Model):
     published_at = models.DateTimeField(null=True, blank=True, db_index=True)
     fetched_at = models.DateTimeField(auto_now=True)
     content_hash = models.CharField(max_length=64)
+    content_type = models.CharField(max_length=20, blank=True)
+    date_provenance = models.JSONField(default=dict)
+    quality = models.JSONField(default=dict)
+    cities = models.JSONField(default=list)
+    places = models.JSONField(default=list)
+    topics = models.JSONField(default=list)
 
 
 class Chunk(models.Model):
@@ -61,4 +67,5 @@ class CrawlLog(models.Model):
     query = models.CharField(max_length=300)
     city = models.CharField(max_length=80, blank=True)
     count = models.PositiveIntegerField(default=0)
+    report = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)

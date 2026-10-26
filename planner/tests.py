@@ -75,7 +75,8 @@ class KnowledgeTests(TestCase):
         from django.conf import settings
         note = Note.objects.create(note_id=name, title=name, content=content,
             url='https://www.xiaohongshu.com/explore/' + name, city='杭州',
-            published_at=None if days is None else timezone.now() - timedelta(days=days), content_hash=name)
+            published_at=None if days is None else timezone.now() - timedelta(days=days), content_hash=name,
+            quality={'accept': True}, date_provenance={'source': 'test_fixture'})
         return Chunk.objects.create(note=note, position=0, content=content,
             embedding=vector or [1., 0.], embedding_model=settings.EMBEDDING_MODEL)
 
@@ -106,13 +107,13 @@ class KnowledgeTests(TestCase):
     def test_dynamic_information_does_not_fall_back_to_old_notes(self, embedding, crawl):
         self.add('old-ticket', 80)
         embedding.return_value.embed_query.return_value = [1., 0.]
-        crawl.return_value = []
+        crawl.return_value = {'new': 0, 'updated': 0, 'stop_reason': 'candidates_exhausted'}
         result = get_travel_info('最近预约规则', '杭州', freshness_days=7)
         self.assertFalse(result['sufficient'])
         self.assertEqual(result['evidence'], [])
         crawl.assert_called_once()
 
-    @patch('planner.services.knowledge.crawler.crawl', return_value=[])
+    @patch('planner.services.knowledge.crawler.crawl', return_value={'new': 0, 'updated': 0, 'stop_reason': 'candidates_exhausted'})
     def test_failed_crawl_is_bounded_and_cached(self, crawl):
         get_travel_info('缺少的资料', '杭州')
         get_travel_info('缺少的资料', '杭州')
@@ -126,9 +127,8 @@ class KnowledgeTests(TestCase):
     @patch('planner.services.knowledge.LocalEmbeddings')
     def test_note_updates_replace_chunks_without_duplicate_note(self, embedding):
         embedding.return_value.embed_documents.side_effect = lambda texts: [[1., 0.] for _ in texts]
-        data = {'note_id': 'same', 'title': '西湖', 'content': '西湖路线介绍。' * 30,
-                'url': 'https://www.xiaohongshu.com/explore/same', 'city': '杭州',
-                'published_at': timezone.now() - timedelta(days=3)}
+        from .test_crawler import valid_note
+        data = valid_note()
         save_notes([data])
         save_notes([data])
         self.assertEqual(Note.objects.count(), 1)
